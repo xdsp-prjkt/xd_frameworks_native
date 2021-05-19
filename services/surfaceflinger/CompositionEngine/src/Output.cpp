@@ -55,18 +55,6 @@ Output::~Output() = default;
 
 namespace impl {
 
-Output::Output() {
-    const bool enableLayerCaching = [] {
-        const bool enable =
-                android::sysprop::SurfaceFlingerProperties::enable_layer_caching().value_or(false);
-        return base::GetBoolProperty(std::string("debug.sf.enable_layer_caching"), enable);
-    }();
-
-    if (enableLayerCaching) {
-        mPlanner = std::make_unique<planner::Planner>();
-    }
-}
-
 namespace {
 
 template <typename T>
@@ -133,6 +121,21 @@ void Output::setCompositionEnabled(bool enabled) {
 
     outputState.isEnabled = enabled;
     dirtyEntireOutput();
+}
+
+void Output::setLayerCachingEnabled(bool enabled) {
+    if (enabled == (mPlanner != nullptr)) {
+        return;
+    }
+
+    if (enabled) {
+        mPlanner = std::make_unique<planner::Planner>();
+        if (mRenderSurface) {
+            mPlanner->setDisplaySize(mRenderSurface->getSize());
+        }
+    } else {
+        mPlanner.reset();
+    }
 }
 
 void Output::setProjection(ui::Rotation orientation, const Rect& layerStackSpaceRect,
@@ -253,6 +256,18 @@ void Output::setColorProfile(const ColorProfile& colorProfile) {
           decodeColorMode(colorProfile.mode).c_str(), colorProfile.mode,
           decodeRenderIntent(colorProfile.renderIntent).c_str(), colorProfile.renderIntent);
 
+    dirtyEntireOutput();
+}
+
+void Output::setDisplayBrightness(float sdrWhitePointNits, float displayBrightnessNits) {
+    auto& outputState = editState();
+    if (outputState.sdrWhitePointNits == sdrWhitePointNits &&
+        outputState.displayBrightnessNits == displayBrightnessNits) {
+        // Nothing changed
+        return;
+    }
+    outputState.sdrWhitePointNits = sdrWhitePointNits;
+    outputState.displayBrightnessNits = displayBrightnessNits;
     dirtyEntireOutput();
 }
 
@@ -1032,8 +1047,13 @@ std::optional<base::unique_fd> Output::composeSurfaces(
     clientCompositionDisplay.outputDataspace = mDisplayColorProfile->hasWideColorGamut()
             ? outputState.dataspace
             : ui::Dataspace::UNKNOWN;
-    clientCompositionDisplay.maxLuminance =
-            mDisplayColorProfile->getHdrCapabilities().getDesiredMaxLuminance();
+
+    // If we have a valid current display brightness use that, otherwise fall back to the
+    // display's max desired
+    clientCompositionDisplay.maxLuminance = outputState.displayBrightnessNits > 0.f
+            ? outputState.displayBrightnessNits
+            : mDisplayColorProfile->getHdrCapabilities().getDesiredMaxLuminance();
+    clientCompositionDisplay.sdrWhitePointNits = outputState.sdrWhitePointNits;
 
     // Compute the global color transform matrix.
     if (!outputState.usesDeviceComposition && !getSkipColorTransform()) {
